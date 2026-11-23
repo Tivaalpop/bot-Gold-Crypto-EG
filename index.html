@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Gold & Crypto EG</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --card: #131822;
+    --card-border: #1f2735;
+    --gold: #d4af37;
+    --gold-soft: rgba(212, 175, 55, 0.14);
+    --green: #16c784;
+    --red: #ea3943;
+    --text: #f3f5f8;
+    --muted: #8b95a7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { background: var(--bg); color: var(--text); padding: 14px 14px 80px; -webkit-tap-highlight-color: transparent; }
+
+  .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px; background: linear-gradient(135deg, #161c28, #0f131b);
+    border: 1px solid var(--card-border); border-radius: 16px; margin-bottom: 14px;
+  }
+  .brand h1 { font-size: 16px; font-weight: 800; color: var(--gold); letter-spacing: 0.4px; }
+  .brand span { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .refresh-btn {
+    background: var(--gold-soft); color: var(--gold); border: 1px solid rgba(212,175,55,0.35);
+    padding: 8px 12px; border-radius: 12px; font-size: 12px; font-weight: 700; cursor: pointer;
+  }
+  .refresh-btn:active { transform: scale(0.95); }
+
+  .tabs {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px;
+    background: var(--card); padding: 5px; border-radius: 14px;
+    border: 1px solid var(--card-border); margin-bottom: 14px;
+  }
+  .tab {
+    border: none; background: transparent; color: var(--muted);
+    padding: 9px 4px; border-radius: 10px; font-size: 12px; font-weight: 700; cursor: pointer;
+  }
+  .tab.active { background: var(--gold); color: #0b0e14; }
+
+  .section { display: none; }
+  .section.active { display: block; animation: fade .2s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .card {
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 14px; padding: 12px;
+  }
+  .card-title { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .card-val { font-size: 18px; font-weight: 800; color: var(--text); direction: ltr; text-align: right; }
+  .card-sub { font-size: 11px; color: var(--gold); margin-top: 4px; }
+
+  .list-card { background: var(--card); border: 1px solid var(--card-border); border-radius: 14px; overflow: hidden; margin-bottom: 12px; }
+  .list-head { padding: 10px 14px; font-size: 13px; font-weight: 700; color: var(--gold); border-bottom: 1px solid var(--card-border); }
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 11px 14px; border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .row:last-child { border-bottom: none; }
+  .row-name { font-size: 13px; font-weight: 700; }
+  .row-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .row-val { text-align: left; direction: ltr; }
+  .price { font-size: 14px; font-weight: 800; }
+  .badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; margin-top: 2px; }
+  .up { background: rgba(22,199,132,0.14); color: var(--green); }
+  .down { background: rgba(234,57,67,0.14); color: var(--red); }
+
+  .calc-box label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 5px; }
+  .calc-box input, .calc-box select {
+    width: 100%; padding: 11px 12px; border-radius: 10px;
+    border: 1px solid var(--card-border); background: #0d1119; color: var(--text); font-size: 14px;
+  }
+  .calc-result {
+    margin-top: 14px; padding: 14px; border-radius: 12px;
+    background: var(--gold-soft); border: 1px solid rgba(212,175,55,0.35);
+    text-align: center;
+  }
+  .calc-result .big { font-size: 22px; font-weight: 800; color: var(--gold); margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="brand">
+    <h1>GOLD & CRYPTO EG</h1>
+    <span><i class="dot"></i> مباشر • آخر تحديث <b id="updated">--:--:--</b></span>
+  </div>
+  <button class="refresh-btn" onclick="loadData(true)">🔄 تحديث</button>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="openTab('gold', this)">🟡 الذهب</button>
+  <button class="tab" onclick="openTab('crypto', this)">🟣 كريبتو</button>
+  <button class="tab" onclick="openTab('fx', this)">🔵 عملات</button>
+  <button class="tab" onclick="openTab('calc', this)">🧮 حاسبة</button>
+</div>
+
+<!-- 🟡 الذهب والفضة -->
+<div id="tab-gold" class="section active">
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">أونصة الذهب العالمية</div>
+      <div class="card-val" id="gold-oz">$—</div>
+      <div class="card-sub">XAU / USD</div>
+    </div>
+    <div class="card">
+      <div class="card-title">الدولار مقابل الجنيه</div>
+      <div class="card-val" id="usd-egp">—</div>
+      <div class="card-sub">USD / EGP</div>
+    </div>
+  </div>
+  <div class="list-card">
+    <div class="list-head">🟡 أسعار الذهب في مصر (جنيه / جرام)</div>
+    <div id="gold-list"></div>
+  </div>
+  <div class="list-card">
+    <div class="list-head">⚪ أسعار الفضة في مصر</div>
+    <div id="silver-list"></div>
+  </div>
+</div>
+
+<!-- 🟣 العملات الرقمية -->
+<div id="tab-crypto" class="section">
+  <div class="list-card">
+    <div class="list-head">🟣 أبرز العملات الرقمية (Binance)</div>
+    <div id="crypto-list"></div>
+  </div>
+</div>
+
+<!-- 🔵 العملات الأجنبية والنفط -->
+<div id="tab-fx" class="section">
+  <div class="card" style="margin-bottom:12px;">
+    <div class="card-title">🟤 خام برنت العالمي (برميل)</div>
+    <div class="card-val" id="oil-price">$—</div>
+    <div id="oil-chg" style="margin-top:4px;"></div>
+  </div>
+  <div class="list-card">
+    <div class="list-head">🔵 العملات الأجنبية مقابل الجنيه المصري</div>
+    <div id="fx-list"></div>
+  </div>
+</div>
+
+<!-- 🧮 حاسبة الذهب الفورية -->
+<div id="tab-calc" class="section">
+  <div class="card calc-box">
+    <div class="card-title" style="color:var(--gold); font-weight:700; font-size:14px;">🧮 حاسبة الذهب بالمصنعية</div>
+    <label>العيار</label>
+    <select id="c-karat" onchange="calcGold()">
+      <option value="21" selected>عيار 21</option>
+      <option value="24">عيار 24 (سبائك)</option>
+      <option value="18">عيار 18</option>
+      <option value="14">عيار 14</option>
+    </select>
+    <label>الوزن (بالجرام)</label>
+    <input id="c-grams" type="number" value="10" min="0" step="0.1" oninput="calcGold()" />
+    <label>المصنعية للجرام (جنيه)</label>
+    <input id="c-making" type="number" value="150" min="0" step="5" oninput="calcGold()" />
+    <div class="calc-result">
+      <div style="font-size:12px; color:var(--muted);">الإجمالي التقديري</div>
+      <div class="big" id="c-total">— EGP</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); tg.setHeaderColor('#0b0e14'); }
+
+let marketData = null;
+const fmt = (n, d=2) => n == null ? '—' : Number(n).toLocaleString('en-US', {minimumFractionDigits: d, maximumFractionDigits: d});
+
+function openTab(id, el) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-' + id).classList.add('active');
+  el.classList.add('active');
+  if (tg?.HapticFeedback) tg.HapticFeedback.selectionChanged();
+}
+
+function calcGold() {
+  if (!marketData?.metals) return;
+  const k = document.getElementById('c-karat').value;
+  const g = parseFloat(document.getElementById('c-grams').value) || 0;
+  const m = parseFloat(document.getElementById('c-making').value) || 0;
+  const price = marketData.metals.gold[k]?.sell || 0;
+  document.getElementById('c-total').textContent = fmt((price + m) * g, 0) + ' EGP';
+}
+
+function render(d) {
+  marketData = d;
+  document.getElementById('updated').textContent = d.updated_at || '--:--:--';
+
+  if (d.metals) {
+    document.getElementById('gold-oz').textContent = '$' + fmt(d.metals.gold_oz_usd);
+    document.getElementById('usd-egp').textContent = fmt(d.metals.usd_egp) + ' EGP';
+
+    const gRows = [24, 21, 18, 14].map(k => `
+      <div class="row">
+        <div><div class="row-name">ذهب عيار ${k}</div><div class="row-sub">شراء: ${fmt(d.metals.gold[k].buy)}</div></div>
+        <div class="row-val"><div class="price">${fmt(d.metals.gold[k].sell)} EGP</div><div class="row-sub">سعر البيع</div></div>
+      </div>`).join('') + `
+      <div class="row">
+        <div><div class="row-name">الجنيه الذهب (8 جرام)</div></div>
+        <div class="row-val"><div class="price" style="color:var(--gold)">${fmt(d.metals.coin, 0)} EGP</div></div>
+      </div>`;
+    document.getElementById('gold-list').innerHTML = gRows;
+
+    document.getElementById('silver-list').innerHTML = `
+      <div class="row"><div class="row-name">فضة عيار 999</div><div class="price">${fmt(d.metals.silver_999)} EGP</div></div>
+      <div class="row"><div class="row-name">فضة عيار 925</div><div class="price">${fmt(d.metals.silver_925)} EGP</div></div>`;
+    calcGold();
+  }
+
+  if (d.crypto) {
+    const order = ['BTC','ETH','SOL','BNB','TON','XRP','DOGE','USDT'];
+    document.getElementById('crypto-list').innerHTML = order.filter(s => d.crypto[s]).map(s => {
+      const c = d.crypto[s];
+      const up = c.change_24h >= 0;
+      return `<div class="row">
+        <div><div class="row-name">${s}</div><div class="row-sub">${c.source}</div></div>
+        <div class="row-val">
+          <div class="price">$${fmt(c.price, c.price < 1 ? 4 : 2)}</div>
+          <span class="badge ${up ? 'up' : 'down'}">${up ? '+' : ''}${fmt(c.change_24h)}%</span>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  if (d.oil) {
+    document.getElementById('oil-price').textContent = '$' + fmt(d.oil.price);
+    const up = d.oil.change_24h >= 0;
+    document.getElementById('oil-chg').innerHTML = `<span class="badge ${up ? 'up' : 'down'}">${up ? '▲ +' : '▼ '}${fmt(d.oil.change_24h)}%</span>`;
+  }
+
+  if (d.fx) {
+    const egp = d.fx.EGP;
+    const names = {USD:'دولار أمريكي', EUR:'يورو', GBP:'جنيه إسترليني', SAR:'ريال سعودي', AED:'درهم إماراتي', KWD:'دينار كويتي', QAR:'ريال قطري'};
+    document.getElementById('fx-list').innerHTML = Object.entries(names).map(([code, name]) => {
+      const val = code === 'USD' ? egp : (d.fx[code] ? egp / d.fx[code] : null);
+      return `<div class="row"><div class="row-name">${name} (${code})</div><div class="price">${fmt(val)} EGP</div></div>`;
+    }).join('');
+  }
+}
+
+async function loadData(force=false) {
+  try {
+    const res = await fetch('/api/market' + (force ? '?force=1' : ''));
+    render(await res.json());
+  } catch (e) { console.error(e); }
+}
+
+loadData();
+setInterval(() => loadData(false), 12000);
+</script>
+</body>
+</html>
