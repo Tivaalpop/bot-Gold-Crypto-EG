@@ -2607,43 +2607,54 @@ def main():
     if not S.token or S.token == "ضع_توكن_البوت_هنا":
         raise SystemExit("❌ ضع BOT_TOKEN في ملف .env أو داخل Settings.token أولاً.")
 
-    req = HTTPXRequest(
-        connection_pool_size=32,
-        connect_timeout=10.0,
-        read_timeout=15.0,
-        write_timeout=15.0,
-        pool_timeout=10.0,
-    )
+    while True:
+        try:
+            req = HTTPXRequest(
+                connection_pool_size=32,
+                connect_timeout=10.0,
+                read_timeout=15.0,
+                write_timeout=15.0,
+                pool_timeout=10.0,
+            )
 
-    app = (
-        Application.builder()
-        .token(S.token)
-        .request(req)
-        .concurrent_updates(True)
-        .post_init(_post_init)
-        .post_shutdown(_post_shutdown)
-        .build()
-    )
+            app = (
+                Application.builder()
+                .token(S.token)
+                .request(req)
+                .concurrent_updates(True)
+                .post_init(_post_init)
+                .post_shutdown(_post_shutdown)
+                .build()
+            )
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("price", cmd_price))
-    app.add_handler(CommandHandler("cancel", cmd_cancel))
-    app.add_handler(CommandHandler("admin", cmd_admin))
-    app.add_handler(CallbackQueryHandler(cb_router))
-    app.add_handler(MessageHandler(filters.UpdateType.MESSAGE & ~filters.COMMAND, input_router))
-    app.add_error_handler(error_handler)
+            app.add_handler(CommandHandler("start", cmd_start))
+            app.add_handler(CommandHandler("help", cmd_help))
+            app.add_handler(CommandHandler("price", cmd_price))
+            app.add_handler(CommandHandler("cancel", cmd_cancel))
+            app.add_handler(CommandHandler("admin", cmd_admin))
+            app.add_handler(CallbackQueryHandler(cb_router))
+            app.add_handler(MessageHandler(filters.UpdateType.MESSAGE & ~filters.COMMAND, input_router))
+            app.add_error_handler(error_handler)
 
-    jq = app.job_queue
-    if jq is None:
-        log.error('❌ JobQueue غير متاح — ثبّت: pip install "python-telegram-bot[job-queue]"')
-    else:
-        jq.run_repeating(job_market_sync, interval=15, first=15)
-        jq.run_repeating(job_alerts, interval=S.alert_interval, first=18)
-        jq.run_repeating(job_digest, interval=60, first=30)
+            jq = app.job_queue
+            if jq is None:
+                log.error('❌ JobQueue غير متاح — ثبّت: pip install "python-telegram-bot[job-queue]"')
+            else:
+                jq.run_repeating(job_market_sync, interval=15, first=15)
+                jq.run_repeating(job_alerts, interval=S.alert_interval, first=18)
+                jq.run_repeating(job_digest, interval=60, first=30)
 
-    log.info("🚀 Turbo Pro Financial Bot running...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+            log.info("🚀 Turbo Pro Financial Bot running...")
+            app.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True,
+                bootstrap_retries=5,
+            )
+            break
+        except RetryAfter as e:
+            wait_s = int(e.retry_after) + 3
+            log.warning(f"⏳ Telegram Flood Control — waiting {wait_s}s before retry...")
+            time.sleep(wait_s)
 
 if __name__ == "__main__":
     main()
