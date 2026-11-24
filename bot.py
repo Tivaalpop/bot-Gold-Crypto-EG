@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-💎 Live Financial Tracker Bot — Turbo Pro Edition
+💎 Live Financial Tracker Bot — Turbo Pro Edition (FIXED)
 Engine: Background Sync + Stale-While-Revalidate (0ms Cache) + Concurrent Updates
 UI: 100% Colored Native Buttons + Quick Switch Bar + Full Admin Panel + Multi-Channel Force Sub
 """
@@ -17,13 +17,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Optional
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from aiohttp import web
 
 import httpx
 import aiosqlite
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from aiohttp import web
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, RetryAfter, TelegramError
 from telegram.request import HTTPXRequest
@@ -44,14 +43,14 @@ log = logging.getLogger("bot")
 START_TIME = time.monotonic()
 
 # ═══════════════════════════════════════════════════════════
-#  ⚙️  CONFIG
+# ⚙️ CONFIG
 # ═══════════════════════════════════════════════════════════
+
 def _csv_ints(v: str) -> set[int]:
     return {int(x.strip()) for x in v.split(",") if x.strip().isdigit()}
 
 @dataclass(frozen=True)
 class Settings:
-    # ضع توكن البوت هنا أو في ملف .env باسم BOT_TOKEN
     token: str = os.getenv("BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN", ""))
     admin_ids: set[int] = field(default_factory=lambda: _csv_ints(os.getenv("ADMIN_IDS", "")))
     db_path: str = os.getenv("DB_PATH", "financial_tracker.sqlite3")
@@ -70,8 +69,9 @@ TZ = ZoneInfo(S.tz)
 OZ_G = 31.1034768
 
 # ═══════════════════════════════════════════════════════════
-#  ⚡  IN-MEMORY FAST CACHES (Zero-Latency RAM Layer)
+# ⚡ IN-MEMORY FAST CACHES (Zero-Latency RAM Layer)
 # ═══════════════════════════════════════════════════════════
+
 RUNTIME_CFG: dict[str, Any] = {
     "fsub_enabled": False,
     "maintenance": False,
@@ -83,10 +83,11 @@ RUNTIME_CFG: dict[str, Any] = {
     "fsub_channels": [],
 }
 
-_FSUB_OK_CACHE: dict[int, float] = {}     # user_id -> monotonic timestamp (5 min TTL)
-_TOUCH_CACHE: dict[int, float] = {}       # user_id -> last DB write timestamp (60s throttle)
-_LAST_REFRESH: dict[int, float] = {}      # anti-spam refresh cooldown
+_FSUB_OK_CACHE: dict[int, float] = {}
+_TOUCH_CACHE: dict[int, float] = {}
+_LAST_REFRESH: dict[int, float] = {}
 _BG_SYNC_COUNT: int = 0
+_WARMUP_TASK: Optional[asyncio.Task] = None
 
 _BTN_HAS_STYLE = "style" in inspect.signature(InlineKeyboardButton.__init__).parameters
 
@@ -94,7 +95,7 @@ def btn(
     text: str,
     callback_data: Optional[str] = None,
     url: Optional[str] = None,
-    style: str = "primary",  # "primary" أزرق | "success" أخضر | "danger" أحمر
+    style: str = "primary",
 ) -> InlineKeyboardButton:
     """إنشاء زر ملون 100% متوافق مع جميع إصدارات python-telegram-bot."""
     kwargs: dict[str, Any] = {"text": text}
@@ -105,16 +106,16 @@ def btn(
     if style in ("primary", "success", "danger") and RUNTIME_CFG.get("colored_buttons", True):
         if _BTN_HAS_STYLE:
             kwargs["style"] = style
-        else:
-            kwargs["api_kwargs"] = {"style": style}
+        # else: نتجاهل الـ style بدل ما نرمي exception
     return InlineKeyboardButton(**kwargs)
 
 def is_admin(uid: int) -> bool:
     return uid in S.admin_ids or uid in RUNTIME_CFG["dynamic_admins"]
 
 # ═══════════════════════════════════════════════════════════
-#  🎨  FORMATTING & HELPERS
+# 🎨 FORMATTING & HELPERS
 # ═══════════════════════════════════════════════════════════
+
 COIN_ICON = {
     "BTC": "🟠", "ETH": "🔷", "SOL": "🟪", "BNB": "🟨",
     "TON": "💎", "XRP": "⚪", "DOGE": "🐕", "USDT": "🟢",
@@ -186,8 +187,8 @@ def trend(pct: Optional[float]) -> tuple[str, str]:
 def head(emoji: str, title: str, badge: str = "⚡ مباشر") -> str:
     return (
         f"╭──────────────────────╮\n"
-        f"  {emoji} <b>{title}</b>\n"
-        f"  {badge}  •  🕐   <code>{now_hm()}</code>\n"
+        f" {emoji} {title}\n"
+        f" {badge} • 🕐 {now_hm()}\n"
         f"╰──────────────────────╯"
     )
 
@@ -198,7 +199,6 @@ async def safe_answer(q, text: Optional[str] = None, show_alert: bool = False):
         pass
 
 def answer_bg(q, text: Optional[str] = None, show_alert: bool = False):
-    """إرسال الرد على الزر بالتوازي بدون تعطيل تعديل الرسالة."""
     asyncio.create_task(safe_answer(q, text, show_alert))
 
 async def safe_edit(q, text: str, kb=None):
@@ -223,10 +223,13 @@ async def safe_edit(q, text: str, kb=None):
                 pass
         else:
             log.warning(f"safe_edit error: {e}")
+    except TelegramError as e:
+        log.warning(f"safe_edit telegram error: {e}")
 
 # ═══════════════════════════════════════════════════════════
-#  💾  DATABASE (Persistent WAL + RAM Sync)
+# 💾 DATABASE (Persistent WAL + RAM Sync)
 # ═══════════════════════════════════════════════════════════
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -234,59 +237,59 @@ PRAGMA temp_store=MEMORY;
 PRAGMA busy_timeout=10000;
 
 CREATE TABLE IF NOT EXISTS users(
-  user_id INTEGER PRIMARY KEY,
-  username TEXT,
-  first_name TEXT,
-  joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  last_seen TEXT,
-  is_banned INTEGER DEFAULT 0,
-  is_blocked INTEGER DEFAULT 0
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_seen TEXT,
+    is_banned INTEGER DEFAULT 0,
+    is_blocked INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS alerts(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL,
-  symbol TEXT NOT NULL,
-  direction TEXT NOT NULL CHECK(direction IN ('above','below')),
-  target REAL NOT NULL,
-  active INTEGER DEFAULT 1,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  triggered_at TEXT
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('above','below')),
+    target REAL NOT NULL,
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    triggered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_alert_active ON alerts(active, symbol);
 CREATE TABLE IF NOT EXISTS holdings(
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL,
-  symbol TEXT NOT NULL,
-  quantity REAL NOT NULL,
-  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(user_id, symbol)
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, symbol)
 );
 CREATE TABLE IF NOT EXISTS digest(
-  user_id INTEGER PRIMARY KEY,
-  enabled INTEGER DEFAULT 0,
-  local_time TEXT DEFAULT '09:00',
-  last_sent TEXT
+    user_id INTEGER PRIMARY KEY,
+    enabled INTEGER DEFAULT 0,
+    local_time TEXT DEFAULT '09:00',
+    last_sent TEXT
 );
 CREATE TABLE IF NOT EXISTS api_status(
-  provider TEXT PRIMARY KEY,
-  ok INTEGER,
-  checked_at TEXT,
-  detail TEXT,
-  latency_ms INTEGER DEFAULT 0
+    provider TEXT PRIMARY KEY,
+    ok INTEGER,
+    checked_at TEXT,
+    detail TEXT,
+    latency_ms INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS settings(
-  key TEXT PRIMARY KEY,
-  value TEXT
+    key TEXT PRIMARY KEY,
+    value TEXT
 );
 CREATE TABLE IF NOT EXISTS fsub_channels(
-  chat_id TEXT PRIMARY KEY,
-  title TEXT NOT NULL,
-  invite_link TEXT NOT NULL,
-  added_at TEXT DEFAULT CURRENT_TIMESTAMP
+    chat_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    invite_link TEXT NOT NULL,
+    added_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS admins(
-  user_id INTEGER PRIMARY KEY,
-  added_at TEXT DEFAULT CURRENT_TIMESTAMP
+    user_id INTEGER PRIMARY KEY,
+    added_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -353,9 +356,8 @@ class DB:
             await self.conn.commit()
         await self.load_runtime_cfg()
 
-    # ---------- USERS (Non-Blocking Throttled Touch) ----------
+    # ---------- USERS ----------
     def touch_user_bg(self, uid: int, uname: Optional[str], fname: Optional[str]):
-        """تسجيل نشاط المستخدم في الخلفية (مرة كل 60 ثانية) بدون أي تعطيل."""
         now_t = time.monotonic()
         if now_t - _TOUCH_CACHE.get(uid, 0.0) < 60.0:
             return
@@ -386,7 +388,9 @@ class DB:
         q = query.strip().lstrip("@")
         if q.isdigit():
             return await self.get_user(int(q))
-        cur = await self.conn.execute("SELECT * FROM users WHERE LOWER(username)=LOWER(?)", (q,))
+        cur = await self.conn.execute(
+            "SELECT * FROM users WHERE LOWER(username)=LOWER(?)", (q,)
+        )
         r = await cur.fetchone()
         return dict(r) if r else None
 
@@ -395,7 +399,10 @@ class DB:
 
     async def set_ban(self, uid: int, banned: bool):
         async with self._lock:
-            await self.conn.execute("UPDATE users SET is_banned=? WHERE user_id=?", (1 if banned else 0, uid))
+            await self.conn.execute(
+                "UPDATE users SET is_banned=? WHERE user_id=?",
+                (1 if banned else 0, uid),
+            )
             await self.conn.commit()
         if banned:
             RUNTIME_CFG["banned_users"].add(uid)
@@ -404,19 +411,28 @@ class DB:
 
     async def mark_blocked(self, uid: int, blocked: bool = True):
         async with self._lock:
-            await self.conn.execute("UPDATE users SET is_blocked=? WHERE user_id=?", (1 if blocked else 0, uid))
+            await self.conn.execute(
+                "UPDATE users SET is_blocked=? WHERE user_id=?",
+                (1 if blocked else 0, uid),
+            )
             await self.conn.commit()
 
     async def recent_users(self, limit: int = 10) -> list[dict]:
-        cur = await self.conn.execute("SELECT * FROM users ORDER BY last_seen DESC LIMIT ?", (limit,))
+        cur = await self.conn.execute(
+            "SELECT * FROM users ORDER BY last_seen DESC LIMIT ?", (limit,)
+        )
         return [dict(r) for r in await cur.fetchall()]
 
     async def banned_users(self) -> list[dict]:
-        cur = await self.conn.execute("SELECT * FROM users WHERE is_banned=1 ORDER BY last_seen DESC LIMIT 20")
+        cur = await self.conn.execute(
+            "SELECT * FROM users WHERE is_banned=1 ORDER BY last_seen DESC LIMIT 20"
+        )
         return [dict(r) for r in await cur.fetchall()]
 
     async def broadcast_targets(self) -> list[int]:
-        cur = await self.conn.execute("SELECT user_id FROM users WHERE is_banned=0 AND is_blocked=0")
+        cur = await self.conn.execute(
+            "SELECT user_id FROM users WHERE is_banned=0 AND is_blocked=0"
+        )
         return [r["user_id"] for r in await cur.fetchall()]
 
     async def stats(self) -> dict[str, int]:
@@ -447,7 +463,9 @@ class DB:
     # ---------- ADMINS ----------
     async def add_admin(self, uid: int):
         async with self._lock:
-            await self.conn.execute("INSERT OR IGNORE INTO admins(user_id) VALUES(?)", (uid,))
+            await self.conn.execute(
+                "INSERT OR IGNORE INTO admins(user_id) VALUES(?)", (uid,)
+            )
             await self.conn.commit()
         await self.load_runtime_cfg()
 
@@ -471,7 +489,9 @@ class DB:
 
     async def remove_fsub_channel(self, chat_id: str):
         async with self._lock:
-            await self.conn.execute("DELETE FROM fsub_channels WHERE chat_id=?", (str(chat_id),))
+            await self.conn.execute(
+                "DELETE FROM fsub_channels WHERE chat_id=?", (str(chat_id),)
+            )
             await self.conn.commit()
         _FSUB_OK_CACHE.clear()
         await self.load_runtime_cfg()
@@ -507,7 +527,8 @@ class DB:
     async def cancel_alert(self, uid: int, aid: int) -> bool:
         async with self._lock:
             cur = await self.conn.execute(
-                "UPDATE alerts SET active=0 WHERE id=? AND user_id=? AND active=1", (aid, uid)
+                "UPDATE alerts SET active=0 WHERE id=? AND user_id=? AND active=1",
+                (aid, uid),
             )
             await self.conn.commit()
             return cur.rowcount > 0
@@ -524,11 +545,16 @@ class DB:
 
     async def remove_holding(self, uid: int, sym: str):
         async with self._lock:
-            await self.conn.execute("DELETE FROM holdings WHERE user_id=? AND symbol=?", (uid, sym.upper()))
+            await self.conn.execute(
+                "DELETE FROM holdings WHERE user_id=? AND symbol=?",
+                (uid, sym.upper()),
+            )
             await self.conn.commit()
 
     async def holdings(self, uid: int) -> list[dict]:
-        cur = await self.conn.execute("SELECT * FROM holdings WHERE user_id=? ORDER BY symbol", (uid,))
+        cur = await self.conn.execute(
+            "SELECT * FROM holdings WHERE user_id=? ORDER BY symbol", (uid,)
+        )
         return [dict(r) for r in await cur.fetchall()]
 
     async def clear_holdings(self, uid: int):
@@ -561,10 +587,12 @@ class DB:
 
     async def mark_digest(self, uid: int, today: str):
         async with self._lock:
-            await self.conn.execute("UPDATE digest SET last_sent=? WHERE user_id=?", (today, uid))
+            await self.conn.execute(
+                "UPDATE digest SET last_sent=? WHERE user_id=?", (today, uid)
+            )
             await self.conn.commit()
 
-    # ---------- API STATUS (Non-Blocking Write) ----------
+    # ---------- API STATUS ----------
     def mark_api_bg(self, name: str, ok: bool, detail: str = "", latency_ms: int = 0):
         asyncio.create_task(self.mark_api(name, ok, detail, latency_ms))
 
@@ -588,8 +616,9 @@ class DB:
 db = DB(S.db_path)
 
 # ═══════════════════════════════════════════════════════════
-#  🌐  TURBO PRICE ENGINE (SWR 0ms Cache + Background Sync)
+# 🌐 TURBO PRICE ENGINE (SWR 0ms Cache + Background Sync)
 # ═══════════════════════════════════════════════════════════
+
 BINANCE_MAP = {
     "BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT",
     "BNB": "BNBUSDT", "TON": "TONUSDT", "XRP": "XRPUSDT",
@@ -624,7 +653,6 @@ class Prices:
         return r.json()
 
     def _trigger_bg_refresh(self, key: str, factory):
-        """تحديث صامت في الخلفية بدون تعطيل المستخدم (SWR Pattern)."""
         if key in self._refreshing:
             return
         self._refreshing.add(key)
@@ -641,12 +669,6 @@ class Prices:
         asyncio.create_task(_runner())
 
     async def _cached(self, key: str, ttl: int, factory, force: bool = False):
-        """
-        Stale-While-Revalidate (SWR):
-        - لو فيه بيانات في الكاش ومش مطلوب force -> رجّعها في 0ms فوراً!
-        - لو عدّى الـ TTL -> جدّدها في الخلفية بصمت للمرة الجاية.
-        - لو force=True -> اجلب السعر لايف فوراً (مع حماية fallback لو الـ API وقع).
-        """
         cached = self.cache.get(key)
         if not force and cached is not None:
             age = time.monotonic() - cached[0]
@@ -670,7 +692,7 @@ class Prices:
                     return cached[1]
                 raise
 
-    # ---------- CRYPTO (Binance Batch → Bybit) ----------
+    # ---------- CRYPTO ----------
     async def _fetch_binance_batch(self, symbols: list[str]) -> dict[str, dict]:
         pairs = [BINANCE_MAP[s] for s in symbols if s in BINANCE_MAP]
         out: dict[str, dict] = {}
@@ -712,8 +734,8 @@ class Prices:
         return out
 
     async def crypto(self, symbols: Optional[list[str]] = None, force: bool = False) -> dict[str, dict]:
-        # استخدام مفتاح موحّد للقائمة الأساسية ليكون الكاش مشتركاً بين كل الشاشات
         target_syms = DEFAULT_COINS
+
         async def fetch():
             t0 = time.monotonic()
             try:
@@ -725,6 +747,7 @@ class Prices:
                 raise ValueError(f"partial {len(r)}")
             except Exception as e:
                 db.mark_api_bg("Binance", False, str(e))
+
             t1 = time.monotonic()
             try:
                 r = await self._fetch_bybit(target_syms)
@@ -735,7 +758,7 @@ class Prices:
                 raise ValueError("empty")
             except Exception as e:
                 db.mark_api_bg("Bybit", False, str(e))
-            raise RuntimeError("All crypto sources failed")
+                raise RuntimeError("All crypto sources failed")
 
         data = await self._cached("crypto:main", S.crypto_ttl, fetch, force)
         if symbols:
@@ -761,15 +784,19 @@ class Prices:
                     valid.append({"symbol": sym[:-4], "price": price, "change": chg})
             valid.sort(key=lambda i: i["change"], reverse=True)
             return {"gainers": valid[:5], "losers": list(reversed(valid[-5:]))}
+
         return await self._cached("movers", S.movers_ttl, fetch, force)
 
     async def search_coin(self, query: str, force: bool = False) -> Optional[dict]:
         q = query.upper().strip().replace("USDT", "")
         if not q.isalnum():
             return None
+
         async def fetch():
             try:
-                d = await self._get("https://api.binance.com/api/v3/ticker/24hr", {"symbol": f"{q}USDT"})
+                d = await self._get(
+                    "https://api.binance.com/api/v3/ticker/24hr", {"symbol": f"{q}USDT"}
+                )
                 return {
                     "symbol": q,
                     "price": float(d["lastPrice"]),
@@ -781,9 +808,10 @@ class Prices:
                 }
             except Exception:
                 return None
+
         return await self._cached(f"search:{q}", 25, fetch, force)
 
-    # ---------- METALS (Parallel XAU + XAG) ----------
+    # ---------- METALS ----------
     async def metals(self, force: bool = False) -> dict[str, Any]:
         async def fetch():
             t0 = time.monotonic()
@@ -803,9 +831,10 @@ class Prices:
             except Exception as e:
                 db.mark_api_bg("Gold-API", False, str(e))
                 raise
+
         return await self._cached("metals", S.metals_ttl, fetch, force)
 
-    # ---------- FX (fawazahmed0 CDN) ----------
+    # ---------- FX ----------
     async def fx(self, force: bool = False) -> dict[str, Any]:
         async def fetch():
             t0 = time.monotonic()
@@ -831,9 +860,10 @@ class Prices:
             except Exception as e:
                 db.mark_api_bg("Currency-FX", False, str(e))
                 raise
+
         return await self._cached("fx", S.fx_ttl, fetch, force)
 
-    # ---------- OIL (Yahoo Finance Brent) ----------
+    # ---------- OIL ----------
     async def oil(self, force: bool = False) -> dict[str, Any]:
         async def fetch():
             t0 = time.monotonic()
@@ -858,6 +888,7 @@ class Prices:
             except Exception as e:
                 db.mark_api_bg("Yahoo Brent", False, str(e))
                 raise
+
         return await self._cached("oil", S.oil_ttl, fetch, force)
 
     # ---------- EGYPT LOCAL METALS ----------
@@ -924,10 +955,10 @@ class Prices:
         return (r["price"], "USD", "USD") if r else None
 
 prices = Prices()
+# ═══════════════════════════════════════════════════════════
+# 🔒 FORCE SUBSCRIBE & ACCESS GATE (RAM-Accelerated)
+# ═══════════════════════════════════════════════════════════
 
-# ═══════════════════════════════════════════════════════════
-#  🔒  FORCE SUBSCRIBE & ACCESS GATE (RAM-Accelerated)
-# ═══════════════════════════════════════════════════════════
 async def check_fsub_missing(bot, user_id: int, bypass_cache: bool = False) -> list[dict]:
     if is_admin(user_id) or not RUNTIME_CFG["fsub_enabled"]:
         return []
@@ -960,9 +991,10 @@ async def check_fsub_missing(bot, user_id: int, bypass_cache: bool = False) -> l
         _FSUB_OK_CACHE[user_id] = time.monotonic()
     return missing
 
+
 def build_fsub_gate(missing: list[dict]) -> tuple[str, InlineKeyboardMarkup]:
     text = (
-        "🔒 <b>الاشتراك الإجباري مطلوب</b>\n\n"
+        "🔒 الاشتراك الإجباري مطلوب\n\n"
         "للاستفادة من أسعار البوت المباشرة والتنبيهات المجانية، "
         "يرجى الاشتراك أولاً في القنوات التالية ثم الضغط على زر التحقق:"
     )
@@ -971,6 +1003,7 @@ def build_fsub_gate(missing: list[dict]) -> tuple[str, InlineKeyboardMarkup]:
         rows.append([btn(f"📢 {i}. {ch['title']}", url=ch["invite_link"], style="primary")])
     rows.append([btn("✅ اشتركت — تحقق الآن", callback_data="fsub:verify", style="success")])
     return text, InlineKeyboardMarkup(rows)
+
 
 async def gate_check(update: Update, context: ContextTypes.DEFAULT_TYPE, is_cb: bool = False) -> bool:
     u = update.effective_user
@@ -981,7 +1014,10 @@ async def gate_check(update: Update, context: ContextTypes.DEFAULT_TYPE, is_cb: 
         if is_cb:
             answer_bg(update.callback_query, "🚫 حسابك محظور.", show_alert=True)
         else:
-            await update.message.reply_text("🚫 <b>تم تقييد وصولك لهذا البوت من قِبل الإدارة.</b>", parse_mode=ParseMode.HTML)
+            await update.message.reply_text(
+                "🚫 <b>تم تقييد وصولك لهذا البوت من قِبل الإدارة.</b>",
+                parse_mode=ParseMode.HTML,
+            )
         return False
 
     if RUNTIME_CFG["maintenance"] and not is_admin(u.id):
@@ -989,7 +1025,8 @@ async def gate_check(update: Update, context: ContextTypes.DEFAULT_TYPE, is_cb: 
             answer_bg(update.callback_query, "🛠️ البوت تحت الصيانة حالياً.", show_alert=True)
         else:
             await update.message.reply_text(
-                "🛠️ <b>البوت في وضع الصيانة والتحديث حالياً</b>\nسنعود للعمل خلال دقائق، شكراً لتفهمك.",
+                "🛠️ <b>البوت في وضع الصيانة والتحديث حالياً</b>\n"
+                "سنعود للعمل خلال دقائق، شكراً لتفهمك.",
                 parse_mode=ParseMode.HTML,
             )
         return False
@@ -1003,12 +1040,13 @@ async def gate_check(update: Update, context: ContextTypes.DEFAULT_TYPE, is_cb: 
         else:
             await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
         return False
-
     return True
 
+
 # ═══════════════════════════════════════════════════════════
-#  🎛️  KEYBOARDS (100% ملونة ومنسّقة هندسياً)
+# 🎛️ KEYBOARDS
 # ═══════════════════════════════════════════════════════════
+
 def kb_main(uid: int = 0) -> InlineKeyboardMarkup:
     rows = [
         [btn("⚡ ملخص السوق الآن", callback_data="m:snap", style="success")],
@@ -1040,11 +1078,12 @@ def kb_main(uid: int = 0) -> InlineKeyboardMarkup:
         rows.append([btn("👑 لوحة تحكم الأدمن", callback_data="admin:home", style="danger")])
     return InlineKeyboardMarkup(rows)
 
+
 def kb_back(target: str = "main", label: str = "🔙 القائمة الرئيسية") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[btn(label, callback_data=f"back:{target}", style="danger")]])
 
+
 def kb_market(section: str, extra: Optional[list] = None) -> InlineKeyboardMarkup:
-    """كيبورد الأسواق مع شريط تنقل سريع ملون بين كل الأسواق."""
     quick_tabs = [
         ("metals", "🟡 ذهب"),
         ("crypto", "🟣 كريبتو"),
@@ -1067,13 +1106,15 @@ def kb_market(section: str, extra: Optional[list] = None) -> InlineKeyboardMarku
     ])
     return InlineKeyboardMarkup(rows)
 
+
 # ═══════════════════════════════════════════════════════════
-#  🖼️  SCREEN BUILDERS
+# 🖼️ SCREEN BUILDERS
 # ═══════════════════════════════════════════════════════════
+
 async def screen_snapshot(force: bool = False) -> str:
     m_res, c_res, o_res = await asyncio.gather(
         prices.egypt_metals(force),
-        prices.crypto(["BTC", "ETH", "SOL", "TON"], force),
+        prices.crypto(["BTC", "ETH", "SOL", "TON"], force=force),
         prices.oil(force),
         return_exceptions=True,
     )
@@ -1081,26 +1122,27 @@ async def screen_snapshot(force: bool = False) -> str:
     if not isinstance(m_res, Exception):
         lines += [
             "",
-            "🟡 <b>المعادن والدولار (مصر):</b>",
-            f"  • ذهب عيار 21:  <code>{fmt(m_res['gold'][21]['mid'])}</code> EGP",
-            f"  • ذهب عيار 24:  <code>{fmt(m_res['gold'][24]['mid'])}</code> EGP",
-            f"  • أونصة الذهب:  <code>${fmt(m_res['gold_oz_usd'])}</code>",
-            f"  • فضة 999:      <code>{fmt(m_res['silver_999'])}</code> EGP",
-            f"  • الدولار USD:  <code>{fmt(m_res['usd_egp'])}</code> EGP",
+            "🟡 المعادن والدولار (مصر):",
+            f" • ذهب عيار 21: {fmt(m_res['gold'][21]['mid'])} EGP",
+            f" • ذهب عيار 24: {fmt(m_res['gold'][24]['mid'])} EGP",
+            f" • أونصة الذهب: ${fmt(m_res['gold_oz_usd'])}",
+            f" • فضة 999: {fmt(m_res['silver_999'])} EGP",
+            f" • الدولار USD: {fmt(m_res['usd_egp'])} EGP",
         ]
     if not isinstance(c_res, Exception):
-        lines.append("\n🟣 <b>أبرز العملات الرقمية:</b>")
+        lines.append("\n🟣 أبرز العملات الرقمية:")
         for sym in ("BTC", "ETH", "SOL", "TON"):
             it = c_res.get(sym)
             if it:
                 ic, _ = trend(it["change_24h"])
                 lines.append(
-                    f"  {COIN_ICON[sym]} <b>{sym}:</b> <code>${fmt(it['price'])}</code>  {ic} {it['change_24h']:+.2f}%"
+                    f" {COIN_ICON[sym]} {sym}: ${fmt(it['price'])} {ic} {it['change_24h']:+.2f}%"
                 )
     if not isinstance(o_res, Exception):
         ic, _ = trend(o_res["change_24h"])
-        lines.append(f"\n🟤 <b>خام برنت:</b> <code>${fmt(o_res['price'])}</code>  {ic} {o_res['change_24h']:+.2f}%")
+        lines.append(f"\n🟤 خام برنت: ${fmt(o_res['price'])} {ic} {o_res['change_24h']:+.2f}%")
     return "\n".join(lines)
+
 
 async def screen_metals(force: bool = False) -> str:
     try:
@@ -1111,29 +1153,30 @@ async def screen_metals(force: bool = False) -> str:
     sp = d["spread_pct"]
     lines = [
         head("🟡", "الذهب والفضة — مباشر"),
-        f"🌍 <b>أونصة الذهب:</b> <code>${fmt(d['gold_oz_usd'])}</code>",
-        f"🌍 <b>أونصة الفضة:</b> <code>${fmt(d['silver_oz_usd'])}</code>",
-        f"💵 <b>سعر الدولار:</b> <code>{fmt(d['usd_egp'])}</code> EGP",
+        f"🌍 أونصة الذهب: ${fmt(d['gold_oz_usd'])}",
+        f"🌍 أونصة الفضة: ${fmt(d['silver_oz_usd'])}",
+        f"💵 سعر الدولار: {fmt(d['usd_egp'])} EGP",
         "",
-        "🟡 <b>أسعار الذهب في مصر (EGP/جرام):</b>",
+        "🟡 أسعار الذهب في مصر (EGP/جرام):",
     ]
     for k in (24, 21, 18, 14):
         if sp > 0:
             lines.append(
-                f"  • <b>عيار {k}:</b> بيع <code>{fmt(g[k]['sell'])}</code> │ شراء <code>{fmt(g[k]['buy'])}</code>"
+                f" • عيار {k}: بيع {fmt(g[k]['sell'])} │ شراء {fmt(g[k]['buy'])}"
             )
         else:
-            lines.append(f"  • <b>عيار {k}:</b> <code>{fmt(g[k]['mid'])}</code> EGP")
+            lines.append(f" • عيار {k}: {fmt(g[k]['mid'])} EGP")
     lines += [
-        f"  • <b>الجنيه الذهب:</b> <code>{fmt(d['coin'])}</code> EGP",
+        f" • الجنيه الذهب: {fmt(d['coin'])} EGP",
         "",
-        "⚪ <b>أسعار الفضة (EGP/جرام):</b>",
-        f"  • <b>عيار 999:</b> <code>{fmt(d['silver_999'])}</code> EGP",
-        f"  • <b>عيار 925:</b> <code>{fmt(d['silver_925'])}</code> EGP",
+        "⚪ أسعار الفضة (EGP/جرام):",
+        f" • عيار 999: {fmt(d['silver_999'])} EGP",
+        f" • عيار 925: {fmt(d['silver_925'])} EGP",
     ]
     if sp > 0:
-        lines.append(f"\n<i>💡 الأسعار تشمل هامش بيع/شراء {sp:.2f}% بدون مصنعية.</i>")
+        lines.append(f"\n💡 الأسعار تشمل هامش بيع/شراء {sp:.2f}% بدون مصنعية.")
     return "\n".join(lines)
+
 
 async def screen_bullion(force: bool = False) -> str:
     try:
@@ -1148,12 +1191,13 @@ async def screen_bullion(force: bool = False) -> str:
     ]
     lines = [
         head("🧱", "أسعار سبائك الذهب عيار 24"),
-        f"📌 <b>سعر جرام 24:</b> <code>{fmt(g24)}</code> EGP\n",
+        f"📌 سعر جرام 24: {fmt(g24)} EGP\n",
     ]
     for label, w in weights:
-        lines.append(f"  ▫️ <b>{label}:</b> <code>{fmt(g24 * w, 0)}</code> EGP")
-    lines.append("\n<i>💡 الأسعار بدون مصنعية السبيكة (تُضاف حسب الشركة).</i>")
+        lines.append(f" ▫️ {label}: {fmt(g24 * w, 0)} EGP")
+    lines.append("\n💡 الأسعار بدون مصنعية السبيكة (تُضاف حسب الشركة).")
     return "\n".join(lines)
+
 
 async def screen_crypto(force: bool = False) -> str:
     try:
@@ -1168,12 +1212,13 @@ async def screen_crypto(force: bool = False) -> str:
         ic, bar = trend(item["change_24h"])
         icon = COIN_ICON.get(sym, "🪙")
         lines.append(
-            f"{icon} <b>{sym:<4}</b> <code>${fmt(item['price'])}</code>\n"
-            f"     {ic} <code>{item['change_24h']:+.2f}%</code>  {bar}"
+            f"{icon} {sym:<4} ${fmt(item['price'])}\n"
+            f" {ic} {item['change_24h']:+.2f}% {bar}"
         )
     src = next(iter(d.values()))["source"] if d else "—"
-    lines.append(f"\n📡 <i>المصدر: {src} • محرك فوري</i>")
+    lines.append(f"\n📡 المصدر: {src} • محرك فوري")
     return "\n".join(lines)
+
 
 async def screen_movers(force: bool = False) -> str:
     try:
@@ -1181,14 +1226,15 @@ async def screen_movers(force: bool = False) -> str:
     except Exception:
         return "⚠️ تعذر جلب حركة السوق حالياً."
     lines = [head("🔥", "الأعلى صعوداً وهبوطاً (24س)")]
-    lines.append("\n🚀 <b>أكثر العملات صعوداً:</b>")
+    lines.append("\n🚀 أكثر العملات صعوداً:")
     for x in m["gainers"]:
-        lines.append(f"  🟢 <b>{x['symbol']}</b>  <code>${fmt(x['price'])}</code>  (<code>+{x['change']:.2f}%</code>)")
-    lines.append("\n📉 <b>أكثر العملات هبوطاً:</b>")
+        lines.append(f" 🟢 {x['symbol']} ${fmt(x['price'])} (+{x['change']:.2f}%)")
+    lines.append("\n📉 أكثر العملات هبوطاً:")
     for x in m["losers"]:
-        lines.append(f"  🔴 <b>{x['symbol']}</b>  <code>${fmt(x['price'])}</code>  (<code>{x['change']:.2f}%</code>)")
-    lines.append("\n<i>📡 فلتر السيولة: حجم تداول يتجاوز 5 مليون دولار (Binance)</i>")
+        lines.append(f" 🔴 {x['symbol']} ${fmt(x['price'])} ({x['change']:.2f}%)")
+    lines.append("\n📡 فلتر السيولة: حجم تداول يتجاوز 5 مليون دولار (Binance)")
     return "\n".join(lines)
+
 
 async def screen_fx(force: bool = False) -> str:
     try:
@@ -1209,9 +1255,10 @@ async def screen_fx(force: bool = False) -> str:
     for code, (flag, name) in names.items():
         rate = d.get(code)
         val = egp_per_usd if code == "USD" else (egp_per_usd / rate if rate else None)
-        lines.append(f"{flag} <b>{name} ({code}):</b> <code>{fmt(val)}</code> EGP")
-    lines.append(f"\n📅 التاريخ المرجعي: <code>{d.get('date', '—')}</code>")
+        lines.append(f"{flag} {name} ({code}): {fmt(val)} EGP")
+    lines.append(f"\n📅 التاريخ المرجعي: {d.get('date', '—')}")
     return "\n".join(lines)
+
 
 async def screen_oil(force: bool = False) -> str:
     try:
@@ -1221,30 +1268,33 @@ async def screen_oil(force: bool = False) -> str:
     ic, bar = trend(d["change_24h"])
     return "\n".join([
         head("🟤", "خام برنت العالمي — مباشر"),
-        f"💵 <b>السعر الحالي:</b> <code>${fmt(d['price'])}</code> / برميل",
-        f"{ic} <b>التغير اليومي:</b> <code>{d['change_24h']:+.2f}%</code>  {bar}",
-        f"📉 <b>الإغلاق السابق:</b> <code>${fmt(d['previous_close'])}</code>",
-        f"\n📡 <i>المصدر: {d['source']}</i>",
+        f"💵 السعر الحالي: ${fmt(d['price'])} / برميل",
+        f"{ic} التغير اليومي: {d['change_24h']:+.2f}% {bar}",
+        f"📉 الإغلاق السابق: ${fmt(d['previous_close'])}",
+        f"\n📡 المصدر: {d['source']}",
     ])
+
 
 def welcome_message(first_name: str) -> str:
     custom = RUNTIME_CFG.get("welcome_text", "").strip()
     if custom:
         return custom.replace("{name}", esc(first_name))
     return (
-        f"👋 أهلاً بك يا <b>{esc(first_name)}</b>!\n\n"
-        "💎 <b>بوت الأسعار المباشرة — Turbo Pro</b>\n"
+        f"👋 أهلاً بك يا {esc(first_name)}!\n\n"
+        "💎 بوت الأسعار المباشرة — Turbo Pro\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🟡 أسعار الذهب والسبائك والفضة لايف\n"
         "🟣 العملات الرقمية + الأعلى صعوداً وهبوطاً\n"
         "🔵 العملات الأجنبية وخام برنت\n"
         "🔔 تنبيهات ذكية + 💼 محفظة مزدوجة العملة\n\n"
-        "👇 <b>اختر من القائمة بالأسفل:</b>"
+        "👇 اختر من القائمة بالأسفل:"
     )
 
+
 # ═══════════════════════════════════════════════════════════
-#  🧭  USER COMMANDS
+# 🧭 USER COMMANDS
 # ═══════════════════════════════════════════════════════════
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     u = update.effective_user
@@ -1257,6 +1307,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
     )
 
+
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text(
@@ -1265,6 +1316,7 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
     )
 
+
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     db.touch_user_bg(u.id, u.username, u.first_name)
@@ -1272,41 +1324,43 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not context.args:
         return await update.message.reply_text(
-            "🔎 <b>الاستعلام السريع:</b>\n"
-            "اكتب: <code>/price BTC</code>\n"
-            "أمثلة: <code>BTC</code>, <code>ETH</code>, <code>XAU</code>, <code>GOLD_21</code>, <code>BRENT</code>, <code>USD_EGP</code>",
+            "🔎 الاستعلام السريع:\n"
+            "اكتب: /price BTC\n"
+            "أمثلة: BTC, ETH, XAU, GOLD_21, BRENT, USD_EGP",
             parse_mode=ParseMode.HTML,
         )
     sym = context.args[0].upper()
     r = await prices.price_of(sym)
     if not r:
         return await update.message.reply_text(
-            f"⚠️ لم يتم العثور على الرمز <b>{esc(sym)}</b>.",
+            f"⚠️ لم يتم العثور على الرمز {esc(sym)}.",
             parse_mode=ParseMode.HTML,
         )
     price, unit, _ = r
     label = ASSET_LABELS.get(sym, sym)
     await update.message.reply_text(
-        f"💎 <b>{label}</b>\n"
-        f"💵 <code>{fmt(price)}</code> {unit}\n"
-        f"🕐 <code>{now_hm()}</code>",
+        f"💎 {label}\n"
+        f"💵 {fmt(price)} {unit}\n"
+        f"🕐 {now_hm()}",
         parse_mode=ParseMode.HTML,
         reply_markup=kb_main(u.id),
     )
+
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await gate_check(update, context, is_cb=False):
         return
     await update.message.reply_text(
-        "❓ <b>دليل الاستخدام السريع</b>\n\n"
-        "• <b>⚡ ملخص السوق:</b> أهم الأسعار في شاشة واحدة.\n"
-        "• <b>🔄 تحديث لحظي:</b> يجلب السعر فوراً متجاوزاً الكاش.\n"
-        "• <b>🔔 التنبيهات:</b> فحص تلقائي كل 20 ثانية وإشعار فوري.\n"
-        "• <b>💼 محفظتي:</b> تحسب ثروتك بالدولار والجنيه معاً.\n"
-        "• <b>أوامر سريعة:</b> <code>/price BTC</code> أو <code>/cancel</code>.",
+        "❓ دليل الاستخدام السريع\n\n"
+        "• ⚡ ملخص السوق: أهم الأسعار في شاشة واحدة.\n"
+        "• 🔄 تحديث لحظي: يجلب السعر فوراً متجاوزاً الكاش.\n"
+        "• 🔔 التنبيهات: فحص تلقائي كل 20 ثانية وإشعار فوري.\n"
+        "• 💼 محفظتي: تحسب ثروتك بالدولار والجنيه معاً.\n"
+        "• أوامر سريعة: /price BTC أو /cancel.",
         reply_markup=kb_back(),
         parse_mode=ParseMode.HTML,
     )
+
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -1316,22 +1370,24 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text, kb = await build_admin_home()
     await update.message.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
+
 # ═══════════════════════════════════════════════════════════
-#  🛡️  ADMIN PANEL BUILDERS (100% Colored)
+# 🛡️ ADMIN PANEL BUILDERS
 # ═══════════════════════════════════════════════════════════
+
 async def build_admin_home() -> tuple[str, InlineKeyboardMarkup]:
     st = await db.stats()
     fsub_st = "🟢 مفعّل" if RUNTIME_CFG["fsub_enabled"] else "🔴 متوقف"
     maint_st = "🟠 مفعّل" if RUNTIME_CFG["maintenance"] else "🟢 متوقف"
     text = (
         f"{head('👑', 'لوحة تحكم الأدمن الشاملة', '🛡️ Admin')}\n\n"
-        f"👥 <b>المستخدمون:</b> <code>{st['total']}</code>  (نشط 24س: <code>{st['active_24h']}</code>)\n"
-        f"🆕 <b>جدد اليوم:</b> <code>{st['new_today']}</code>  │  🚫 محظور: <code>{st['banned']}</code>\n"
-        f"🔔 <b>تنبيهات نشطة:</b> <code>{st['alerts']}</code>  │  💼 محافظ: <code>{st['portfolios']}</code>\n"
-        f"📢 <b>الاشتراك الإجباري:</b> {fsub_st} (<code>{st['fsub_count']}</code> قناة)\n"
-        f"🛠️ <b>وضع الصيانة:</b> {maint_st}\n"
-        f"⚡ <b>محرك التحديث الخلفي:</b> <code>{_BG_SYNC_COUNT}</code> دورة\n"
-        f"⏱️ <b>مدة التشغيل:</b> <code>{format_uptime()}</code>"
+        f"👥 المستخدمون: {st['total']} (نشط 24س: {st['active_24h']})\n"
+        f"🆕 جدد اليوم: {st['new_today']} │ 🚫 محظور: {st['banned']}\n"
+        f"🔔 تنبيهات نشطة: {st['alerts']} │ 💼 محافظ: {st['portfolios']}\n"
+        f"📢 الاشتراك الإجباري: {fsub_st} ({st['fsub_count']} قناة)\n"
+        f"🛠️ وضع الصيانة: {maint_st}\n"
+        f"⚡ محرك التحديث الخلفي: {_BG_SYNC_COUNT} دورة\n"
+        f"⏱️ مدة التشغيل: {format_uptime()}"
     )
     kb = InlineKeyboardMarkup([
         [
@@ -1358,30 +1414,32 @@ async def build_admin_home() -> tuple[str, InlineKeyboardMarkup]:
     ])
     return text, kb
 
+
 async def render_admin_stats(q):
     st = await db.stats()
     c_age = prices.cache_age("crypto:main")
     m_age = prices.cache_age("metals")
     text = (
         f"{head('📊', 'الإحصائيات والأداء', '🛡️ Admin')}\n\n"
-        f"👥 <b>إجمالي المستخدمين:</b> <code>{st['total']}</code>\n"
-        f"⚡ <b>نشطين (آخر 24 ساعة):</b> <code>{st['active_24h']}</code>\n"
-        f"🆕 <b>مستخدمين جدد اليوم:</b> <code>{st['new_today']}</code>\n"
-        f"🚫 <b>محظورين من الإدارة:</b> <code>{st['banned']}</code>\n"
-        f"🔕 <b>حظروا البوت:</b> <code>{st['blocked']}</code>\n"
+        f"👥 إجمالي المستخدمين: {st['total']}\n"
+        f"⚡ نشطين (آخر 24 ساعة): {st['active_24h']}\n"
+        f"🆕 مستخدمين جدد اليوم: {st['new_today']}\n"
+        f"🚫 محظورين من الإدارة: {st['banned']}\n"
+        f"🔕 حظروا البوت: {st['blocked']}\n"
         f"────────────────────\n"
-        f"🔔 <b>تنبيهات نشطة:</b> <code>{st['alerts']}</code> │ 💼 <b>محافظ:</b> <code>{st['portfolios']}</code>\n"
-        f"📰 <b>مشتركو النشرة:</b> <code>{st['digest']}</code> │ 📢 <b>قنوات:</b> <code>{st['fsub_count']}</code>\n"
+        f"🔔 تنبيهات نشطة: {st['alerts']} │ 💼 محافظ: {st['portfolios']}\n"
+        f"📰 مشتركو النشرة: {st['digest']} │ 📢 قنوات: {st['fsub_count']}\n"
         f"────────────────────\n"
-        f"🚀 <b>عمر الكاش:</b> كريبتو <code>{c_age if c_age is not None else '—'}ث</code> │ معادن <code>{m_age if m_age is not None else '—'}ث</code>\n"
-        f"🧠 <b>عناصر الرام:</b> <code>{len(prices.cache)}</code> │ <b>دورات التحديث:</b> <code>{_BG_SYNC_COUNT}</code>\n"
-        f"⏱️ <b>Uptime:</b> <code>{format_uptime()}</code>"
+        f"🚀 عمر الكاش: كريبتو {c_age if c_age is not None else '—'}ث │ معادن {m_age if m_age is not None else '—'}ث\n"
+        f"🧠 عناصر الرام: {len(prices.cache)} │ دورات التحديث: {_BG_SYNC_COUNT}\n"
+        f"⏱️ Uptime: {format_uptime()}"
     )
     kb = InlineKeyboardMarkup([
         [btn("🔄 تحديث الإحصائيات", callback_data="admin:stats", style="success")],
         [btn("🔙 لوحة الأدمن", callback_data="admin:home", style="danger")],
     ])
     await safe_edit(q, text, kb)
+
 
 async def render_admin_apis(q, run_check: bool = False):
     if run_check:
@@ -1402,10 +1460,10 @@ async def render_admin_apis(q, run_check: bool = False):
             ic = "🟢" if s["ok"] else "🔴"
             ms = f" ({s['latency_ms']}ms)" if s.get("latency_ms") else ""
             lines.append(
-                f"{ic} <b>{esc(s['provider'])}</b>{ms}\n"
-                f"   🕐 <code>{s['checked_at']}</code> • <i>{esc(s['detail'])}</i>"
+                f"{ic} {esc(s['provider'])}{ms}\n"
+                f" 🕐 {s['checked_at']} • {esc(s['detail'])}"
             )
-    lines.append(f"\n🧠 <b>حجم الكاش:</b> <code>{len(prices.cache)}</code> عنصر")
+    lines.append(f"\n🧠 حجم الكاش: {len(prices.cache)} عنصر")
     kb = InlineKeyboardMarkup([
         [
             btn("⚡ فحص كل الـ APIs الآن", callback_data="admin:apis:check", style="success"),
@@ -1415,21 +1473,22 @@ async def render_admin_apis(q, run_check: bool = False):
     ])
     await safe_edit(q, "\n".join(lines), kb)
 
+
 async def render_admin_fsub(q):
     channels = RUNTIME_CFG["fsub_channels"]
     enabled = RUNTIME_CFG["fsub_enabled"]
     status = "🟢 مفعّل الآن" if enabled else "🔴 متوقف حالياً"
     lines = [
         head("📢", "إدارة الاشتراك الإجباري", "🛡️ Admin"),
-        f"\n📌 <b>الحالة:</b> {status}",
-        f"📺 <b>القنوات المضافة ({len(channels)}):</b>\n",
+        f"\n📌 الحالة: {status}",
+        f"📺 القنوات المضافة ({len(channels)}):\n",
     ]
     kb_rows = []
     if not channels:
         lines.append("💤 لا توجد قنوات مضافة بعد.")
     else:
         for idx, ch in enumerate(channels, 1):
-            lines.append(f"  {idx}. <b>{esc(ch['title'])}</b>\n     ID: <code>{esc(ch['chat_id'])}</code>")
+            lines.append(f" {idx}. {esc(ch['title'])}\n ID: {esc(ch['chat_id'])}")
             kb_rows.append([
                 btn(f"🔗 {ch['title'][:18]}", url=ch["invite_link"], style="primary"),
                 btn("🗑️ حذف", callback_data=f"admin:fsub:del:{ch['chat_id']}", style="danger"),
@@ -1446,6 +1505,7 @@ async def render_admin_fsub(q):
     kb_rows.append([btn("🔙 لوحة الأدمن", callback_data="admin:home", style="danger")])
     await safe_edit(q, "\n".join(lines), InlineKeyboardMarkup(kb_rows))
 
+
 async def render_admin_settings(q):
     maint = RUNTIME_CFG["maintenance"]
     colors = RUNTIME_CFG["colored_buttons"]
@@ -1460,16 +1520,20 @@ async def render_admin_settings(q):
         f"💬 <b>رسالة الترحيب:</b> {has_welcome}"
     )
     kb = InlineKeyboardMarkup([
-        [btn(
-            "🟢 إيقاف وضع الصيانة" if maint else "🔴 تفعيل وضع الصيانة",
-            callback_data="admin:set:maint",
-            style="success" if maint else "danger",
-        )],
-        [btn(
-            "🎨 تلوين الأزرار: مفعّل ✅" if colors else "🎨 تلوين الأزرار: متوقف ❌",
-            callback_data="admin:set:colors",
-            style="success" if colors else "primary",
-        )],
+        [
+            btn(
+                "🟢 إيقاف وضع الصيانة" if maint else "🔴 تفعيل وضع الصيانة",
+                callback_data="admin:set:maint",
+                style="success" if maint else "danger",
+            )
+        ],
+        [
+            btn(
+                "🎨 تلوين الأزرار: مفعّل ✅" if colors else "🎨 تلوين الأزرار: متوقف ❌",
+                callback_data="admin:set:colors",
+                style="success" if colors else "primary",
+            )
+        ],
         [btn("⚖️ تعديل هامش الذهب (%)", callback_data="admin:set:spread", style="primary")],
         [
             btn("✏️ تعديل الترحيب", callback_data="admin:set:welcome", style="primary"),
@@ -1479,19 +1543,21 @@ async def render_admin_settings(q):
     ])
     await safe_edit(q, text, kb)
 
+
 async def render_admin_users(q):
     recent = await db.recent_users(8)
-    lines = [head("👤", "إدارة المستخدمين", "🛡️ Admin"), "\n🕒 <b>آخر المستخدمين تفاعلاً:</b>"]
+    lines = [head("👤", "إدارة المستخدمين", "🛡️ Admin"), "\n🕒 آخر المستخدمين تفاعلاً:"]
     for u in recent:
         un = f"@{u['username']}" if u["username"] else "بدون يوزر"
         flag = "🚫" if u["is_banned"] else "🟢"
-        lines.append(f"  {flag} <code>{u['user_id']}</code> • {esc(u['first_name'])} ({esc(un)})")
+        lines.append(f" {flag} {u['user_id']} • {esc(u['first_name'])} ({esc(un)})")
     kb = InlineKeyboardMarkup([
         [btn("🔎 بحث عن مستخدم (ID أو @يوزر)", callback_data="admin:users:find", style="primary")],
         [btn("🚫 قائمة المحظورين", callback_data="admin:users:banned", style="danger")],
         [btn("🔙 لوحة الأدمن", callback_data="admin:home", style="danger")],
     ])
     await safe_edit(q, "\n".join(lines), kb)
+
 
 async def render_admin_user_card(target_obj, user_row: dict, is_cb: bool = True):
     uid = user_row["user_id"]
@@ -1501,13 +1567,13 @@ async def render_admin_user_card(target_obj, user_row: dict, is_cb: bool = True)
     st = "🚫 محظور" if user_row["is_banned"] else "🟢 نشط"
     text = (
         f"{head('👤', 'بطاقة المستخدم', '🛡️ Admin')}\n\n"
-        f"🆔 <b>ID:</b> <code>{uid}</code>\n"
-        f"👤 <b>الاسم:</b> {esc(user_row['first_name'])}\n"
-        f"🔗 <b>اليوزر:</b> {esc(un)}\n"
-        f"📌 <b>الحالة:</b> {st}\n"
-        f"📅 <b>تاريخ الانضمام:</b> <code>{user_row['joined_at']}</code>\n"
-        f"🕐 <b>آخر ظهور:</b> <code>{user_row['last_seen']}</code>\n"
-        f"🔔 <b>تنبيهات:</b> <code>{alerts_c}</code> │ 💼 <b>أصول بالمحفظة:</b> <code>{holds_c}</code>"
+        f"🆔 ID: {uid}\n"
+        f"👤 الاسم: {esc(user_row['first_name'])}\n"
+        f"🔗 اليوزر: {esc(un)}\n"
+        f"📌 الحالة: {st}\n"
+        f"📅 تاريخ الانضمام: {user_row['joined_at']}\n"
+        f"🕐 آخر ظهور: {user_row['last_seen']}\n"
+        f"🔔 تنبيهات: {alerts_c} │ 💼 أصول بالمحفظة: {holds_c}"
     )
     kb = InlineKeyboardMarkup([
         [
@@ -1525,27 +1591,30 @@ async def render_admin_user_card(target_obj, user_row: dict, is_cb: bool = True)
     else:
         await target_obj.reply_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
+
 async def render_admin_admins(q):
     lines = [head("👑", "إدارة المشرفين (Admins)", "🛡️ Admin"), ""]
-    lines.append("🔒 <b>المالك الأساسي (من الإعدادات):</b>")
+    lines.append("🔒 المالك الأساسي (من الإعدادات):")
     for aid in sorted(S.admin_ids):
-        lines.append(f"  • <code>{aid}</code>")
+        lines.append(f" • {aid}")
     dyn = sorted(RUNTIME_CFG["dynamic_admins"] - S.admin_ids)
-    lines.append("\n🛡️ <b>الأدمن المضافون من اللوحة:</b>")
+    lines.append("\n🛡️ الأدمن المضافون من اللوحة:")
     kb_rows = []
     if not dyn:
-        lines.append("  💤 لا يوجد أدمن إضافيون.")
+        lines.append(" 💤 لا يوجد أدمن إضافيون.")
     else:
         for aid in dyn:
-            lines.append(f"  • <code>{aid}</code>")
+            lines.append(f" • {aid}")
             kb_rows.append([btn(f"🗑️ إزالة {aid}", callback_data=f"admin:adm:del:{aid}", style="danger")])
     kb_rows.append([btn("➕ إضافة أدمن جديد (بالـ ID)", callback_data="admin:adm:add", style="success")])
     kb_rows.append([btn("🔙 لوحة الأدمن", callback_data="admin:home", style="danger")])
     await safe_edit(q, "\n".join(lines), InlineKeyboardMarkup(kb_rows))
 
+
 # ═══════════════════════════════════════════════════════════
-#  📄  USER SUB-MENUS (100% Colored)
+# 📄 USER SUB-MENUS
 # ═══════════════════════════════════════════════════════════
+
 async def render_alerts(q):
     rows = await db.user_alerts(q.from_user.id)
     lines = [head("🔔", "تنبيهاتك النشطة")]
@@ -1556,11 +1625,12 @@ async def render_alerts(q):
         for a in rows:
             arrow = "⬆️ أعلى من" if a["direction"] == "above" else "⬇️ أقل من"
             lbl = ASSET_LABELS.get(a["symbol"], a["symbol"])
-            lines.append(f"  #{a['id']} • <b>{lbl}</b>\n     {arrow} <code>{fmt(a['target'])}</code>")
+            lines.append(f" #{a['id']} • {lbl}\n {arrow} {fmt(a['target'])}")
             kb_rows.append([btn(f"🗑️ إلغاء تنبيه #{a['id']}", callback_data=f"alert:cancel:{a['id']}", style="danger")])
     kb_rows.append([btn("➕ إضافة تنبيه جديد", callback_data="alert:new", style="success")])
     kb_rows.append([btn("🔙 القائمة الرئيسية", callback_data="back:main", style="danger")])
     await safe_edit(q, "\n".join(lines), InlineKeyboardMarkup(kb_rows))
+
 
 async def alert_start(q):
     kb = InlineKeyboardMarkup([
@@ -1583,7 +1653,8 @@ async def alert_start(q):
         ],
         [btn("❌ إلغاء", callback_data="menu:alerts", style="danger")],
     ])
-    await safe_edit(q, "🔔 <b>اختر الأصل الذي تريد مراقبته:</b>", kb)
+    await safe_edit(q, "🔔 اختر الأصل الذي تريد مراقبته:", kb)
+
 
 async def render_portfolio(q):
     rows = await db.holdings(q.from_user.id)
@@ -1599,7 +1670,9 @@ async def render_portfolio(q):
             usd_egp = 50.0
         total_usd = 0.0
         total_egp = 0.0
-        res_list = await asyncio.gather(*[prices.price_of(r["symbol"]) for r in rows], return_exceptions=True)
+        res_list = await asyncio.gather(
+            *[prices.price_of(r["symbol"]) for r in rows], return_exceptions=True
+        )
         for r, p in zip(rows, res_list):
             lbl = ASSET_LABELS.get(r["symbol"], r["symbol"])
             if not isinstance(p, Exception) and p:
@@ -1614,26 +1687,28 @@ async def render_portfolio(q):
                 total_usd += val_usd
                 total_egp += val_egp
                 lines.append(
-                    f"  • <b>{lbl}</b>\n"
-                    f"    الكمية: <code>{r['quantity']:g}</code> │ "
-                    f"القيمة: <code>{fmt(val_egp, 0)}</code> EGP (<code>${fmt(val_usd)}</code>)"
+                    f" • {lbl}\n"
+                    f" الكمية: {r['quantity']:g} │ "
+                    f"القيمة: {fmt(val_egp, 0)} EGP (${fmt(val_usd)})"
                 )
             else:
-                lines.append(f"  • <b>{lbl}</b>: <code>{r['quantity']:g}</code> (السعر غير متاح)")
+                lines.append(f" • {lbl}: {r['quantity']:g} (السعر غير متاح)")
             kb_rows.append([btn(f"🗑️ حذف {r['symbol']}", callback_data=f"port:del:{r['symbol']}", style="danger")])
         lines += [
             "────────────────────",
-            f"💰 <b>الإجمالي بالجنيه:</b> <code>{fmt(total_egp, 0)}</code> EGP",
-            f"💵 <b>الإجمالي بالدولار:</b> <code>${fmt(total_usd)}</code>",
+            f"💰 الإجمالي بالجنيه: {fmt(total_egp, 0)} EGP",
+            f"💵 الإجمالي بالدولار: ${fmt(total_usd)}",
         ]
-    kb_rows.append([
-        btn("➕ إضافة أصل", callback_data="port:new", style="success"),
-        btn("🔄 تحديث", callback_data="menu:portfolio", style="primary"),
-    ])
-    if rows:
+        kb_rows.append([
+            btn("➕ إضافة أصل", callback_data="port:new", style="success"),
+            btn("🔄 تحديث", callback_data="menu:portfolio", style="primary"),
+        ])
         kb_rows.append([btn("🧹 مسح المحفظة بالكامل", callback_data="port:clear", style="danger")])
+    if not rows:
+        kb_rows.append([btn("➕ إضافة أصل", callback_data="port:new", style="success")])
     kb_rows.append([btn("🔙 القائمة الرئيسية", callback_data="back:main", style="danger")])
     await safe_edit(q, "\n".join(lines), InlineKeyboardMarkup(kb_rows))
+
 
 async def port_start(q):
     kb = InlineKeyboardMarkup([
@@ -1656,16 +1731,17 @@ async def port_start(q):
         ],
         [btn("❌ إلغاء", callback_data="menu:portfolio", style="danger")],
     ])
-    await safe_edit(q, "💼 <b>اختر الأصل لإضافته لمحفظتك:</b>", kb)
+    await safe_edit(q, "💼 اختر الأصل لإضافته لمحفظتك:", kb)
+
 
 async def render_digest(q):
     d = await db.get_digest(q.from_user.id)
     enabled = bool(d and d["enabled"])
     cur_t = d["local_time"] if d else "09:00"
-    st = f"🟢 مفعّلة يومياً الساعة <code>{cur_t}</code>" if enabled else "🔴 متوقفة حالياً"
+    st = f"🟢 مفعّلة يومياً الساعة {cur_t}" if enabled else "🔴 متوقفة حالياً"
     text = (
         f"{head('📰', 'النشرة اليومية التلقائية')}\n\n"
-        f"📌 <b>حالتك الآن:</b> {st}\n"
+        f"📌 حالتك الآن: {st}\n"
         "ستصلك يومياً رسالة ملخصة بأهم أسعار الذهب والفضة والعملات بتوقيت القاهرة."
     )
     kb = InlineKeyboardMarkup([
@@ -1679,6 +1755,7 @@ async def render_digest(q):
     ])
     await safe_edit(q, text, kb)
 
+
 async def render_calc(q):
     kb = InlineKeyboardMarkup([
         [btn("🟡 حاسبة الذهب بالمصنعية", callback_data="calc:gold", style="primary")],
@@ -1688,17 +1765,19 @@ async def render_calc(q):
     ])
     await safe_edit(q, head("🧮", "الحاسبة الذكية") + "\n\nاختر نوع الحساب:", kb)
 
+
 # ═══════════════════════════════════════════════════════════
-#  🔀  CALLBACK ROUTER (Ultra-Fast Non-Blocking)
+# 🔀 CALLBACK ROUTER
 # ═══════════════════════════════════════════════════════════
+
 async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     d = q.data or ""
     uid = q.from_user.id
 
-    # تسجيل نشاط المستخدم في الخلفية (0ms wait)
     db.touch_user_bg(uid, q.from_user.username, q.from_user.first_name)
 
+    # ── fsub:verify ──
     if d == "fsub:verify":
         missing = await check_fsub_missing(context.bot, uid, bypass_cache=True)
         if missing:
@@ -1714,7 +1793,7 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not d.startswith(("alert:dir:", "admin:bc:go")):
         context.user_data.pop("waiting_for", None)
 
-    # ---------- NAVIGATION ----------
+    # ── NAVIGATION ──
     if d.startswith("back:"):
         answer_bg(q)
         return await safe_edit(q, welcome_message(q.from_user.first_name), kb_main(uid))
@@ -1731,11 +1810,10 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb_back(),
         )
 
-    # ---------- MARKETS & REFRESH ----------
+    # ── MARKETS & REFRESH ──
     if d in ("m:snap", "m:metals", "m:bullion", "m:crypto", "m:movers", "m:fx", "m:oil") or d.startswith("refresh:"):
         is_refresh = d.startswith("refresh:")
         sec = d.split(":")[1]
-
         if is_refresh:
             now_t = time.monotonic()
             if now_t - _LAST_REFRESH.get(uid, 0.0) < 1.5:
@@ -1744,7 +1822,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             answer_bg(q, "🔄 تحديث لحظي...")
         else:
             answer_bg(q)
-
         extra = None
         if sec == "snap":
             text = await screen_snapshot(is_refresh)
@@ -1769,7 +1846,7 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = await screen_oil(is_refresh)
         return await safe_edit(q, text, kb_market(sec, extra))
 
-    # ---------- USER MENUS ----------
+    # ── USER MENUS ──
     if d == "menu:alerts":
         answer_bg(q)
         return await render_alerts(q)
@@ -1783,7 +1860,7 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer_bg(q)
         return await render_calc(q)
 
-    # ---------- ALERTS FLOW ----------
+    # ── ALERTS FLOW ──
     if d == "alert:new":
         answer_bg(q)
         return await alert_start(q)
@@ -1825,7 +1902,7 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer_bg(q, "✅ تم إلغاء التنبيه" if ok else "⚠️ لم يُعثر عليه")
         return await render_alerts(q)
 
-    # ---------- PORTFOLIO FLOW ----------
+    # ── PORTFOLIO FLOW ──
     if d == "port:new":
         answer_bg(q)
         return await port_start(q)
@@ -1836,7 +1913,8 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer_bg(q)
         return await safe_edit(
             q,
-            f"💼 <b>{ASSET_LABELS.get(akey, akey)}</b>\n\nأرسل الكمية التي تملكها (مثال: <code>5</code> أو <code>0.25</code>):",
+            f"💼 <b>{ASSET_LABELS.get(akey, akey)}</b>\n\n"
+            f"أرسل الكمية التي تملكها (مثال: <code>5</code> أو <code>0.25</code>):",
             InlineKeyboardMarkup([[btn("❌ إلغاء", callback_data="menu:portfolio", style="danger")]]),
         )
     if d.startswith("port:del:"):
@@ -1861,7 +1939,7 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer_bg(q, "✅ تم تفريغ المحفظة")
         return await render_portfolio(q)
 
-    # ---------- CALC & SEARCH ----------
+    # ── CALC & SEARCH ──
     if d == "calc:fx":
         context.user_data["waiting_for"] = "calc_fx"
         answer_bg(q)
@@ -1903,7 +1981,7 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardMarkup([[btn("❌ إلغاء", callback_data="back:main", style="danger")]]),
         )
 
-    # ---------- DIGEST ----------
+    # ── DIGEST ──
     if d.startswith("digest:set:"):
         t = d.split(":", 2)[2]
         await db.set_digest(uid, True, t)
@@ -1914,9 +1992,9 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer_bg(q, "🔴 تم إيقاف النشرة")
         return await render_digest(q)
 
-    # ═══════════════════════════════════════════════════════
-    #  👑  ADMIN CALLBACKS
-    # ═══════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════
+    # 👑 ADMIN CALLBACKS
+    # ══════════════════════════════════════════════════════
     if d.startswith("admin:"):
         if not is_admin(uid):
             return answer_bg(q, "🚫 صلاحية أدمن فقط.", show_alert=True)
@@ -1925,37 +2003,32 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             answer_bg(q)
             text, kb = await build_admin_home()
             return await safe_edit(q, text, kb)
-
         if d == "admin:stats":
             answer_bg(q)
             return await render_admin_stats(q)
-
         if d == "admin:apis":
             answer_bg(q)
             return await render_admin_apis(q, run_check=False)
-
         if d == "admin:apis:check":
             answer_bg(q, "⚡ جاري فحص جميع المصادر...")
             return await render_admin_apis(q, run_check=True)
-
         if d == "admin:cache:clear":
             prices.clear_cache()
             answer_bg(q, "🧹 تم مسح الكاش!")
-            asyncio.create_task(_warmup_cache())
+            global _WARMUP_TASK
+            _WARMUP_TASK = asyncio.create_task(_warmup_cache())
             return await render_admin_apis(q, run_check=False)
 
         # ----- Force Sub Admin -----
         if d == "admin:fsub":
             answer_bg(q)
             return await render_admin_fsub(q)
-
         if d == "admin:fsub:toggle":
             new_val = "0" if RUNTIME_CFG["fsub_enabled"] else "1"
             await db.set_setting("fsub_enabled", new_val)
             _FSUB_OK_CACHE.clear()
             answer_bg(q, "✅ تم تحديث حالة الاشتراك الإجباري")
             return await render_admin_fsub(q)
-
         if d == "admin:fsub:add":
             context.user_data["waiting_for"] = "admin_add_fsub"
             answer_bg(q)
@@ -1964,12 +2037,11 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📢 <b>إضافة قناة اشتراك إجباري</b>\n\n"
                 "1️⃣ ارفع البوت <b>أدمن (Admin)</b> في القناة أولاً.\n"
                 "2️⃣ ثم أرسل لي أحد التالي:\n"
-                "  • يوزر القناة مثل: <code>@MyChannel</code>\n"
-                "  • أو معرّف القناة مثل: <code>-1001234567890</code>\n"
-                "  • أو قم بعمل <b>توجيه (Forward)</b> لأي منشور من القناة هنا.",
+                " • يوزر القناة مثل: <code>@MyChannel</code>\n"
+                " • أو معرّف القناة مثل: <code>-1001234567890</code>\n"
+                " • أو قم بعمل <b>توجيه (Forward)</b> لأي منشور من القناة هنا.",
                 InlineKeyboardMarkup([[btn("❌ إلغاء", callback_data="admin:fsub", style="danger")]]),
             )
-
         if d.startswith("admin:fsub:del:"):
             cid = d.split(":", 3)[3]
             await db.remove_fsub_channel(cid)
@@ -1987,7 +2059,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "<i>ستظهر لك شاشة تأكيد قبل بدء الإرسال.</i>",
                 InlineKeyboardMarkup([[btn("❌ إلغاء", callback_data="admin:home", style="danger")]]),
             )
-
         if d == "admin:bc:go":
             bc_info = context.user_data.pop("bc_payload", None)
             if not bc_info:
@@ -1996,7 +2067,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             targets = await db.broadcast_targets()
             total = len(targets)
             await safe_edit(q, f"📣 <b>جاري الإذاعة...</b>\n0 / {total}")
-
             ok_c = blocked_c = fail_c = 0
             for idx, target_uid in enumerate(targets, 1):
                 try:
@@ -2022,7 +2092,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         fail_c += 1
                 except Exception:
                     fail_c += 1
-
                 if idx % 25 == 0 or idx == total:
                     await safe_edit(
                         q,
@@ -2030,7 +2099,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"✅ وصلت: <code>{ok_c}</code> │ 🔕 حظروا البوت: <code>{blocked_c}</code> │ ❌ فشل: <code>{fail_c}</code>",
                     )
                 await asyncio.sleep(0.04)
-
             return await safe_edit(
                 q,
                 f"✅ <b>اكتملت الإذاعة بنجاح!</b>\n\n"
@@ -2045,7 +2113,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if d == "admin:users":
             answer_bg(q)
             return await render_admin_users(q)
-
         if d == "admin:users:find":
             context.user_data["waiting_for"] = "admin_find_user"
             answer_bg(q)
@@ -2054,7 +2121,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🔎 أرسل <b>ID المستخدم</b> أو <b>@username</b>:",
                 InlineKeyboardMarkup([[btn("❌ إلغاء", callback_data="admin:users", style="danger")]]),
             )
-
         if d == "admin:users:banned":
             answer_bg(q)
             b_list = await db.banned_users()
@@ -2064,11 +2130,10 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append("🟢 لا يوجد مستخدمون محظورون.")
             else:
                 for u in b_list:
-                    lines.append(f"  • <code>{u['user_id']}</code> — {esc(u['first_name'])}")
+                    lines.append(f" • <code>{u['user_id']}</code> — {esc(u['first_name'])}")
                     kb_rows.append([btn(f"✅ فك حظر {u['user_id']}", callback_data=f"admin:u:ban:{u['user_id']}:0", style="success")])
             kb_rows.append([btn("🔙 إدارة المستخدمين", callback_data="admin:users", style="danger")])
             return await safe_edit(q, "\n".join(lines), InlineKeyboardMarkup(kb_rows))
-
         if d.startswith("admin:u:ban:"):
             parts = d.split(":")
             t_uid, flag = int(parts[3]), int(parts[4]) == 1
@@ -2080,7 +2145,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if u_row:
                 return await render_admin_user_card(q, u_row, is_cb=True)
             return await render_admin_users(q)
-
         if d.startswith("admin:u:dm:"):
             t_uid = int(d.split(":")[3])
             context.user_data["dm_target"] = t_uid
@@ -2096,17 +2160,14 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if d == "admin:settings":
             answer_bg(q)
             return await render_admin_settings(q)
-
         if d == "admin:set:maint":
             await db.set_setting("maintenance", "0" if RUNTIME_CFG["maintenance"] else "1")
             answer_bg(q, "✅ تم تحديث وضع الصيانة")
             return await render_admin_settings(q)
-
         if d == "admin:set:colors":
             await db.set_setting("colored_buttons", "0" if RUNTIME_CFG["colored_buttons"] else "1")
             answer_bg(q, "✅ تم تحديث تلوين الأزرار")
             return await render_admin_settings(q)
-
         if d == "admin:set:spread":
             context.user_data["waiting_for"] = "admin_spread"
             answer_bg(q)
@@ -2116,7 +2177,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "أرسل النسبة المئوية (مثلاً <code>0.5</code> أو <code>0</code> للسعر العالمي الصافي بدون هامش):",
                 InlineKeyboardMarkup([[btn("❌ إلغاء", callback_data="admin:settings", style="danger")]]),
             )
-
         if d == "admin:set:welcome":
             context.user_data["waiting_for"] = "admin_welcome"
             answer_bg(q)
@@ -2126,7 +2186,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "<i>يمكنك استخدام</i> <code>{name}</code> <i>ليضع البوت اسم المستخدم تلقائياً.</i>",
                 InlineKeyboardMarkup([[btn("❌ إلغاء", callback_data="admin:settings", style="danger")]]),
             )
-
         if d == "admin:set:welcome_reset":
             await db.set_setting("welcome_text", "")
             answer_bg(q, "♻️ تم استرجاع رسالة الترحيب الافتراضية")
@@ -2136,7 +2195,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if d == "admin:admins":
             answer_bg(q)
             return await render_admin_admins(q)
-
         if d == "admin:adm:add":
             context.user_data["waiting_for"] = "admin_add_admin"
             answer_bg(q)
@@ -2145,7 +2203,6 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "👑 أرسل <b>ID</b> الشخص الذي تريد ترقيته كأدمن:",
                 InlineKeyboardMarkup([[btn("❌ إلغاء", callback_data="admin:admins", style="danger")]]),
             )
-
         if d.startswith("admin:adm:del:"):
             aid = int(d.split(":")[3])
             await db.remove_admin(aid)
@@ -2166,14 +2223,16 @@ async def cb_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode=ParseMode.HTML,
                     )
             except Exception as e:
-                await q.message.reply_text(f"❌ تعذر إرسال النسخة: {esc(e)}", parse_mode=ParseMode.HTML)
+                await q.message.reply_text(
+                    f"❌ تعذر إرسال النسخة: {esc(e)}", parse_mode=ParseMode.HTML
+                )
             return
 
-    answer_bg(q)
 
 # ═══════════════════════════════════════════════════════════
-#  ✍️  UNIFIED INPUT ROUTER (Text + Media + Forward)
+# ✍️ UNIFIED INPUT ROUTER (Text + Media + Forward)
 # ═══════════════════════════════════════════════════════════
+
 async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     waiting = context.user_data.get("waiting_for")
     if not waiting:
@@ -2217,10 +2276,8 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if raw.startswith("https://t.me/"):
                 raw = "@" + raw.split("t.me/", 1)[1].strip("/").split("/")[0]
             chat_ref = int(raw) if raw.lstrip("-").isdigit() else raw
-
         if not chat_ref:
             return await msg.reply_text("⚠️ أرسل `@username` أو ID القناة أو وجّه رسالة منها.")
-
         try:
             chat = await context.bot.get_chat(chat_ref)
             me = await context.bot.get_chat_member(chat.id, context.bot.id)
@@ -2384,7 +2441,7 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("waiting_for", None)
         return await msg.reply_text(
             f"💱 <b>نتيجة التحويل</b>\n\n"
-            f"<code>{amount:,.2f} {frm}</code>  =  <b><code>{result:,.2f} {to}</code></b>",
+            f"<code>{amount:,.2f} {frm}</code> = <b><code>{result:,.2f} {to}</code></b>",
             reply_markup=kb_main(uid),
             parse_mode=ParseMode.HTML,
         )
@@ -2455,7 +2512,7 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{COIN_ICON.get(r['symbol'], '🪙')} <b>{r['symbol']} / USDT</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"💵 <b>السعر:</b> <code>${fmt(r['price'])}</code>\n"
-            f"{ic} <b>التغير 24س:</b> <code>{r['change_24h']:+.2f}%</code>  {bar}\n"
+            f"{ic} <b>التغير 24س:</b> <code>{r['change_24h']:+.2f}%</code> {bar}\n"
             f"📈 <b>أعلى 24س:</b> <code>${fmt(r['high_24h'])}</code>\n"
             f"📉 <b>أقل 24س:</b> <code>${fmt(r['low_24h'])}</code>\n"
             f"💧 <b>السيولة 24س:</b> <code>${fmt(r['volume_usdt'], 0)}</code>\n"
@@ -2464,11 +2521,12 @@ async def input_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
         )
 
+
 # ═══════════════════════════════════════════════════════════
-#  ⏰  BACKGROUND JOBS (Proactive Sync + Alerts + Digest)
+# ⏰ BACKGROUND JOBS
 # ═══════════════════════════════════════════════════════════
+
 async def job_market_sync(context: ContextTypes.DEFAULT_TYPE):
-    """محرك التحديث الخلفي: يُبقي كل أسعار السوق ساخنة 24/7 للاستجابة الفورية."""
     global _BG_SYNC_COUNT
     _BG_SYNC_COUNT += 1
     tasks = [prices.crypto(force=True)]
@@ -2481,6 +2539,7 @@ async def job_market_sync(context: ContextTypes.DEFAULT_TYPE):
     if _BG_SYNC_COUNT % 40 == 0 or "fx" not in prices.cache:
         tasks.append(prices.fx(force=True))
     await asyncio.gather(*tasks, return_exceptions=True)
+
 
 async def job_alerts(context: ContextTypes.DEFAULT_TYPE):
     alerts = await db.active_alerts()
@@ -2518,6 +2577,7 @@ async def job_alerts(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             log.warning(f"Alert {a['id']} send error: {e}")
 
+
 async def job_digest(context: ContextTypes.DEFAULT_TYPE):
     now_dt = now_local()
     hm = now_dt.strftime("%H:%M")
@@ -2529,7 +2589,7 @@ async def job_digest(context: ContextTypes.DEFAULT_TYPE):
         snap = await screen_snapshot(force=True)
     except Exception:
         return
-    text = f"📰 <b>نشرتك اليومية — {today}</b>\n\n{snap}"
+    text = f"📰 نشرتك اليومية — {today}\n\n{snap}"
     for uid in users:
         try:
             await context.bot.send_message(uid, text, parse_mode=ParseMode.HTML)
@@ -2540,10 +2600,13 @@ async def job_digest(context: ContextTypes.DEFAULT_TYPE):
             pass
         await asyncio.sleep(0.05)
 
+
 # ═══════════════════════════════════════════════════════════
-#  🚀  APP LIFECYCLE & MAIN
+# 🚀 APP LIFECYCLE & MAIN
 # ═══════════════════════════════════════════════════════════
+
 _WEB_RUNNER = None
+
 
 async def _api_market(request):
     force = request.query.get("force") == "1"
@@ -2562,28 +2625,37 @@ async def _api_market(request):
         "oil": None if isinstance(o, Exception) else o,
     })
 
+
 async def _serve_index(request):
-    return web.FileResponse(os.path.join(os.path.dirname(__file__), "index.html"))
+    path = os.path.join(os.path.dirname(__file__), "index.html")
+    if os.path.exists(path):
+        return web.FileResponse(path)
+    return web.Response(
+        text="✅ Bot is running",
+        content_type="text/plain",
+        status=200,
+    )
+
 
 async def _start_webapp():
     global _WEB_RUNNER
-    wapp = web.Application()
-    wapp.router.add_get("/", _serve_index)
-    wapp.router.add_get("/api/market", _api_market)
-    _WEB_RUNNER = web.AppRunner(wapp)
-    await _WEB_RUNNER.setup()
-    port = int(os.getenv("PORT", "8080"))
-    await web.TCPSite(_WEB_RUNNER, "0.0.0.0", port).start()
-    log.info(f"🌐 Mini App running on port {port}")
+    try:
+        wapp = web.Application()
+        wapp.router.add_get("/", _serve_index)
+        wapp.router.add_get("/api/market", _api_market)
+        _WEB_RUNNER = web.AppRunner(wapp)
+        await _WEB_RUNNER.setup()
+        port = int(os.getenv("PORT", "8080"))
+        await web.TCPSite(_WEB_RUNNER, "0.0.0.0", port).start()
+        log.info(f"🌐 Mini App running on port {port}")
+    except Exception as e:
+        log.warning(f"⚠️ WebApp skipped (non-fatal): {e}")
+        _WEB_RUNNER = None
+
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     log.error("Unhandled exception:", exc_info=context.error)
 
-async def _post_init(app: Application):
-    await db.init()
-    log.info("✅ SQLite WAL + RAM Cache ready")
-    await _start_webapp()
-    asyncio.create_task(_warmup_cache())
 
 async def _warmup_cache():
     await asyncio.gather(
@@ -2596,65 +2668,72 @@ async def _warmup_cache():
     )
     log.info("⚡ Turbo Cache 100% warmed up")
 
+
+async def _post_init(app: Application):
+    global _WARMUP_TASK
+    await db.init()
+    log.info("✅ SQLite WAL + RAM Cache ready")
+    if S.webapp_url or os.getenv("PORT"):
+        await _start_webapp()
+    _WARMUP_TASK = asyncio.create_task(_warmup_cache())
+
+
 async def _post_shutdown(app: Application):
+    global _WARMUP_TASK
+    if _WARMUP_TASK and not _WARMUP_TASK.done():
+        _WARMUP_TASK.cancel()
     if _WEB_RUNNER:
-        await _WEB_RUNNER.cleanup()
+        try:
+            await _WEB_RUNNER.cleanup()
+        except Exception:
+            pass
     await prices.close()
     await db.close()
     log.info("🛑 Clean shutdown complete")
+
 
 def main():
     if not S.token or S.token == "ضع_توكن_البوت_هنا":
         raise SystemExit("❌ ضع BOT_TOKEN في ملف .env أو داخل Settings.token أولاً.")
 
-    while True:
-        try:
-            req = HTTPXRequest(
-                connection_pool_size=32,
-                connect_timeout=10.0,
-                read_timeout=15.0,
-                write_timeout=15.0,
-                pool_timeout=10.0,
-            )
+    req = HTTPXRequest(
+        connection_pool_size=32,
+        connect_timeout=10.0,
+        read_timeout=15.0,
+        write_timeout=15.0,
+        pool_timeout=10.0,
+    )
+    app = (
+        Application.builder()
+        .token(S.token)
+        .request(req)
+        .concurrent_updates(True)
+        .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
+        .build()
+    )
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("price", cmd_price))
+    app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CallbackQueryHandler(cb_router))
+    app.add_handler(MessageHandler(filters.UpdateType.MESSAGE & ~filters.COMMAND, input_router))
+    app.add_error_handler(error_handler)
 
-            app = (
-                Application.builder()
-                .token(S.token)
-                .request(req)
-                .concurrent_updates(True)
-                .post_init(_post_init)
-                .post_shutdown(_post_shutdown)
-                .build()
-            )
+    jq = app.job_queue
+    if jq is None:
+        log.error('❌ JobQueue غير متاح — ثبّت: pip install "python-telegram-bot[job-queue]"')
+        log.error('⚠️ البوت هيشتغل بدون تنبيهات/نشرة تلقائية!')
+    else:
+        jq.run_repeating(job_market_sync, interval=15, first=15)
+        jq.run_repeating(job_alerts, interval=S.alert_interval, first=18)
+        jq.run_repeating(job_digest, interval=60, first=30)
+        log.info("✅ Background jobs scheduled")
 
-            app.add_handler(CommandHandler("start", cmd_start))
-            app.add_handler(CommandHandler("help", cmd_help))
-            app.add_handler(CommandHandler("price", cmd_price))
-            app.add_handler(CommandHandler("cancel", cmd_cancel))
-            app.add_handler(CommandHandler("admin", cmd_admin))
-            app.add_handler(CallbackQueryHandler(cb_router))
-            app.add_handler(MessageHandler(filters.UpdateType.MESSAGE & ~filters.COMMAND, input_router))
-            app.add_error_handler(error_handler)
+    log.info("🚀 Turbo Pro Financial Bot running...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
-            jq = app.job_queue
-            if jq is None:
-                log.error('❌ JobQueue غير متاح — ثبّت: pip install "python-telegram-bot[job-queue]"')
-            else:
-                jq.run_repeating(job_market_sync, interval=15, first=15)
-                jq.run_repeating(job_alerts, interval=S.alert_interval, first=18)
-                jq.run_repeating(job_digest, interval=60, first=30)
-
-            log.info("🚀 Turbo Pro Financial Bot running...")
-            app.run_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True,
-                bootstrap_retries=5,
-            )
-            break
-        except RetryAfter as e:
-            wait_s = int(e.retry_after) + 3
-            log.warning(f"⏳ Telegram Flood Control — waiting {wait_s}s before retry...")
-            time.sleep(wait_s)
 
 if __name__ == "__main__":
     main()
